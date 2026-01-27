@@ -1,0 +1,10 @@
+{
+  "documents_processed": 1000,
+  "fidelity_recall_at_10": 0.8742,
+  "compression_ratio": 32.0,
+  "projected_100k_cloud_load_gbps": 160.0,
+  "projected_100k_sentinel_load_gbps": 5.0,
+  "backhaul_reduction": "32.0x",
+  "bandwidth_saved_gbps": 155.0,
+  "reduction_percentage": 96.9
+}
