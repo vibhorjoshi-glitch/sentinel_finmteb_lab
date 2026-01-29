@@ -3,166 +3,100 @@ SENTINEL Dataset Manager
 Smart subset loading from FiQA with guaranteed answerable queries
 """
 
+import json
 import logging
+import os
 import random
 from typing import Dict, Tuple
 from datasets import load_dataset
 
-from src.config import TARGET_DOCS
+from src.config import N_SAMPLES
 
 logger = logging.getLogger(__name__)
 
 
 class SentinelDatasetManager:
-    """Dataset manager for FiQA with smart subset selection."""
-    
-    def __init__(
-        self,
-        dataset_name: str = "mteb/fiqa",
-        cache_dir: str = "data/cache",
-        use_cache: bool = True,
-        verbose: bool = True
-    ):
-        """Initialize dataset manager."""
-        self.dataset_name = dataset_name
+    def __init__(self, cache_dir="data/cache", use_cache=True, verbose=False):
         self.cache_dir = cache_dir
         self.use_cache = use_cache
         self.verbose = verbose
     
-    def load_smart_subset(
-        self,
-        target_docs: int = TARGET_DOCS,
-        loading_method: str = "cached"
-    ) -> Tuple[Dict, Dict, Dict]:
-        """
-        Load smart subset of FiQA data.
+    def _cache_paths(self, target_docs):
+        cache_key = f"finmteb_{target_docs}"
+        return {
+            "corpus": os.path.join(self.cache_dir, f"{cache_key}_corpus.json"),
+            "queries": os.path.join(self.cache_dir, f"{cache_key}_queries.json"),
+            "qrels": os.path.join(self.cache_dir, f"{cache_key}_qrels.json"),
+        }
+    
+    def _load_cache(self, paths):
+        with open(paths["corpus"], "r") as f:
+            corpus = json.load(f)
+        with open(paths["queries"], "r") as f:
+            queries = json.load(f)
+        with open(paths["qrels"], "r") as f:
+            qrels = json.load(f)
+        return corpus, queries, qrels
+    
+    def _save_cache(self, paths, corpus, queries, qrels):
+        os.makedirs(self.cache_dir, exist_ok=True)
+        with open(paths["corpus"], "w") as f:
+            json.dump(corpus, f)
+        with open(paths["queries"], "w") as f:
+            json.dump(queries, f)
+        with open(paths["qrels"], "w") as f:
+            json.dump(qrels, f)
+    
+    def load_smart_subset(self, target_docs, loading_method="cached"):
+        paths = self._cache_paths(target_docs)
+        if (
+            self.use_cache
+            and loading_method == "cached"
+            and all(os.path.exists(path) for path in paths.values())
+        ):
+            if self.verbose:
+                print("   ✓ Loading dataset from cache")
+            return self._load_cache(paths)
         
-        Guarantees:
-        - All selected queries have relevant documents in corpus
-        - Corpus includes all gold documents + random distractors
-        - Enables Recall > 0 evaluation
-        
-        Args:
-            target_docs: Target number of documents (N_SAMPLES)
-            loading_method: Loading method (for compatibility)
-        
-        Returns:
-            (corpus_dict, queries_dict, qrels_dict)
-        """
         if self.verbose:
-            logger.info(f"--- Loading FinMTEB (FiQA) Smart-Subset (target: {target_docs} docs) ---")
+            print("   -> Loading FiQA corpus, queries, and qrels from HuggingFace")
         
-        # Step 1: Load raw datasets
-        if self.verbose:
-            logger.info("Step 1: Loading corpus, queries, and qrels from HuggingFace...")
+        corpus_ds = load_dataset("mteb/fiqa", "corpus", split="corpus")
+        queries_ds = load_dataset("mteb/fiqa", "queries", split="queries")
+        qrels_ds = load_dataset("mteb/fiqa", "default", split="test")
         
-        corpus_ds = load_dataset(self.dataset_name, "corpus", split="corpus")
-        queries_ds = load_dataset(self.dataset_name, "queries", split="queries")
-        qrels_ds = load_dataset(self.dataset_name, "default", split="test")
+        qrels_map = {}
+        doc_ids_needed = []
+        seen_docs = set()
         
-        if self.verbose:
-            logger.info(f"  Loaded {len(corpus_ds)} docs, {len(queries_ds)} queries, {len(qrels_ds)} qrels")
-        
-        # Step 2: Build qrels map {query_id: [doc_id, doc_id, ...]}
-        if self.verbose:
-            logger.info("Step 2: Building qrels map...")
-        
-        qrels_dict = {}
         for row in qrels_ds:
             qid = str(row["query-id"])
-            docid = str(row["corpus-id"])
-            
-            if qid not in qrels_dict:
-                qrels_dict[qid] = []
-            qrels_dict[qid].append(docid)
+            did = str(row["corpus-id"])
+            qrels_map.setdefault(qid, {})
+            qrels_map[qid][did] = 1
+            if did not in seen_docs:
+                doc_ids_needed.append(did)
+                seen_docs.add(did)
+            if target_docs and len(doc_ids_needed) >= target_docs:
+                break
         
-        if self.verbose:
-            logger.info(f"  Built qrels map: {len(qrels_dict)} queries with answers")
+        selected_doc_ids = set(doc_ids_needed)
         
-        # Step 3: Smart subsetting - select answerable queries
-        if self.verbose:
-            logger.info("Step 3: Smart subsetting...")
-        
-        # Find queries with answers
-        valid_qids = [q for q in list(qrels_dict.keys()) if len(qrels_dict[q]) > 0]
-        
-        # Take up to 50K queries (or all available if fewer)
-        num_queries = min(50000, len(valid_qids))
-        selected_query_ids = valid_qids[:num_queries]
-        
-        if self.verbose:
-            logger.info(f"  Selected {len(selected_query_ids)} answerable queries")
-        
-        # Collect all gold documents (answers to selected queries)
-        must_have_doc_ids = set()
-        for qid in selected_query_ids:
-            for doc_id in qrels_dict[qid]:
-                must_have_doc_ids.add(doc_id)
-        
-        if self.verbose:
-            logger.info(f"  Identified {len(must_have_doc_ids)} gold documents")
-        
-        # Fill remaining slots with random distractors
-        remaining_slots = target_docs - len(must_have_doc_ids)
-        if remaining_slots > 0:
-            # Get all doc IDs
-            all_doc_ids = [str(row["_id"]) for row in corpus_ds]
-            
-            # Pool = all docs minus gold docs
-            pool = list(set(all_doc_ids) - must_have_doc_ids)
-            
-            # Sample distractors
-            num_distractors = min(len(pool), remaining_slots)
-            distractors = random.sample(pool, num_distractors)
-            selected_doc_ids = must_have_doc_ids.union(set(distractors))
-            
-            if self.verbose:
-                logger.info(f"  Added {num_distractors} random distractor documents")
-        else:
-            selected_doc_ids = must_have_doc_ids
-        
-        if self.verbose:
-            logger.info(f"  Final subset: {len(selected_doc_ids)} documents")
-        
-        # Step 4: Filter datasets
-        if self.verbose:
-            logger.info("Step 4: Filtering datasets...")
-        
-        # Filter corpus
-        corpus_dict = {}
+        corpus = {}
         for row in corpus_ds:
             row_id = str(row["_id"])
             if row_id in selected_doc_ids:
-                corpus_dict[row_id] = {
-                    "title": row.get("title", ""),
-                    "text": row.get("text", "")
-                }
+                corpus[row_id] = {"title": row["title"], "text": row["text"]}
+                if len(corpus) >= len(selected_doc_ids):
+                    break
         
-        if self.verbose:
-            logger.info(f"  Filtered corpus: {len(corpus_dict)} documents")
-        
-        # Filter queries
-        queries_dict = {}
+        queries = {}
         for row in queries_ds:
             row_id = str(row["_id"])
-            if row_id in selected_query_ids:
-                queries_dict[row_id] = row["text"]
+            if row_id in qrels_map:
+                queries[row_id] = row["text"]
         
-        if self.verbose:
-            logger.info(f"  Filtered queries: {len(queries_dict)} queries")
+        if self.use_cache:
+            self._save_cache(paths, corpus, queries, qrels_map)
         
-        # Filter qrels to only selected docs
-        filtered_qrels = {}
-        for qid in selected_query_ids:
-            if qid in qrels_dict:
-                # Keep only docs that are in filtered corpus
-                filtered_rels = [doc_id for doc_id in qrels_dict[qid] if doc_id in corpus_dict]
-                if filtered_rels:
-                    filtered_qrels[qid] = {doc_id: 1.0 for doc_id in filtered_rels}
-        
-        if self.verbose:
-            logger.info(f"  Filtered qrels: {len(filtered_qrels)} queries with ground truth")
-            avg_rels = sum(len(v) for v in filtered_qrels.values()) / len(filtered_qrels) if filtered_qrels else 0
-            logger.info(f"\n✅ SUBSET LOADED:\n  Docs: {len(corpus_dict)}\n  Queries: {len(queries_dict)}\n  Avg relevant docs/query: {avg_rels:.1f}\n")
-        
-        return corpus_dict, queries_dict, filtered_qrels
+        return corpus, queries, qrels_map

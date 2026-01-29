@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 SENTINEL IEEE Final Benchmark - Production Ready (v2.0)
 Complete integrated implementation with:
@@ -12,13 +13,12 @@ Expected Runtime: ~1.5-2 hours on CPU, ~10-15 minutes on GPU
 Output: results/final_ieee_data.json with complete metrics and agent analysis
 """
 
+import json
+import logging
 import os
 import sys
-import json
 import time
-import logging
-from typing import Dict, List, Tuple, Set
-from collections import defaultdict
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -40,15 +40,13 @@ try:
         DATA_PATH, COLLECTION_NAME, RESULTS_PATH,
         DEVICE, FINAL_RESULTS_FILE, RECALL_AT_K,
         CLOUD_LOAD_GBPS, SENTINEL_LOAD_GBPS, BYTES_PER_FULL_VECTOR,
-        BYTES_PER_RABITQ_VECTOR, DEFAULT_PERSONA,
-        ENABLE_RERANKING, RERANK_MODEL, RERANK_TOP_K, RERANK_BATCH_SIZE
+        BYTES_PER_RABITQ_VECTOR, DEFAULT_PERSONA
     )
     from src.dataset import SentinelDatasetManager
     from src.embedder import SentinelEmbedder
     from src.engine import SentinelEngine
     from src.agents import MultiAgentOrchestrator
     from src.metrics import ComprehensiveEvaluator, RecallCalculator
-    from src.reranker import CrossEncoderReranker
 except ImportError as e:
     logger.error(f"Failed to import Sentinel modules: {e}")
     logger.info("Make sure all src modules are present")
@@ -111,16 +109,19 @@ def _load_finmteb_with_fallback():
     missing_doc_ids = 0
     missing_query_ids = 0
 
-    for qid, doc_ids_dict in qrels.items():
+    for qid, doc_ids in qrels.items():
         if qid not in query_ids:
             missing_query_ids += 1
             continue
-        # qrels is {query_id: {doc_id: score}}, so doc_ids_dict is a dict
-        filtered_docs = {doc_id: score for doc_id, score in doc_ids_dict.items() if doc_id in corpus_ids}
-        if len(filtered_docs) != len(doc_ids_dict):
-            missing_doc_ids += len(doc_ids_dict) - len(filtered_docs)
+        if isinstance(doc_ids, dict):
+            doc_id_list = list(doc_ids.keys())
+        else:
+            doc_id_list = list(doc_ids)
+        filtered_docs = [doc_id for doc_id in doc_id_list if doc_id in corpus_ids]
+        if len(filtered_docs) != len(doc_id_list):
+            missing_doc_ids += len(doc_id_list) - len(filtered_docs)
         if filtered_docs:
-            filtered_qrels[qid] = filtered_docs
+            filtered_qrels[qid] = {doc_id: 1 for doc_id in filtered_docs}
 
     print(f"   ✓ Loaded mode: {load_mode}")
     print(f"   ✓ Loaded {len(corpus):,} documents")
@@ -134,65 +135,6 @@ def _load_finmteb_with_fallback():
     print(f"   [Time] {time.time() - start_load:.1f}s")
 
     return corpus, queries, filtered_qrels
-
-
-def get_smart_subset(
-    target_docs: int = TARGET_DOCS,
-    verbose: bool = True
-) -> Tuple[Dict, Dict, Dict]:
-    """
-    Load FiQA corpus with smart subset selection using SentinelDatasetManager.
-    
-    Strategy:
-    1. Load full FiQA corpus (57,638 documents)
-    2. Load ground-truth qrels (query relevance judgments)
-    3. Filter to documents with actual relevance labels
-    4. Load queries that have relevant documents
-    
-    Result: ~1000 documents with ~300 queries and guaranteed ground truth
-    
-    Args:
-        target_docs: Target number of documents
-        verbose: Print progress
-    
-    Returns:
-        (corpus_dict, queries_dict, qrels_dict)
-    """
-    
-    if verbose:
-        print("\n" + "="*70)
-        print("PHASE 0: SMART SUBSET LOADING")
-        print("="*70)
-    
-    start_load = time.time()
-    
-    try:
-        # Initialize dataset manager
-        manager = SentinelDatasetManager(
-            cache_dir="data/cache",
-            use_cache=True,
-            verbose=verbose
-        )
-        
-        # Load smart subset with ground truth filtering
-        corpus, queries, qrels = manager.load_smart_subset(
-            target_docs=target_docs,
-            loading_method="cached"
-        )
-        
-        elapsed = time.time() - start_load
-        
-        if verbose:
-            print(f"\n✅ SUBSET LOADING COMPLETE ({elapsed:.1f}s)")
-            print(f"   Loaded: {len(corpus)} Docs | {len(queries)} Queries")
-            avg_rels = sum(len(v) for v in qrels.values()) / len(qrels) if qrels else 0
-            print(f"   Avg relevant docs per query: {avg_rels:.1f}")
-        
-        return corpus, queries, qrels
-        
-    except Exception as e:
-        logger.error(f"Failed to load smart subset: {e}", exc_info=True)
-        raise
 
 
 # ============================================================================
@@ -369,7 +311,7 @@ def multi_agent_analysis(
                     query_id=query_id,
                     retrieval_results=results,
                     documents=corpus,
-                    consensus_method="weighted_vote"
+                    consensus_method="weighted_vote",
                 )
                 agent_analyses[query_id] = analysis
             except Exception as e:
@@ -381,7 +323,7 @@ def multi_agent_analysis(
         if verbose:
             print(f"\n✅ MULTI-AGENT ANALYSIS COMPLETE ({elapsed:.1f}s)")
             print(f"   Queries analyzed: {len(agent_analyses)}")
-            print(f"   Success rate: {success_rate*100:.1f}%")
+            print(f"   Success rate: {success_rate * 100:.1f}%")
             if errors:
                 print(f"   Errors: {len(errors)}")
         
@@ -407,19 +349,17 @@ def evaluate_retrieval(
     engine: SentinelEngine,
     qrels: Dict,
     corpus: Dict,
-    reranker = None,
     verbose: bool = True
 ) -> Tuple[Dict, Dict]:
     """
-    Evaluate retrieval with optional cross-encoder reranking.
+    Evaluate retrieval with both ranking and comprehensive metrics.
     
     Args:
         query_ids: List of query IDs
-        query_vectors: Query vectors (N, 384)
+        query_vectors: Query vectors (N, 1536)
         engine: SentinelEngine instance
         qrels: Ground-truth relevance {query_id: {doc_id: score}}
         corpus: Document corpus
-        reranker: Optional CrossEncoderReranker for precision improvement
         verbose: Print progress
     
     Returns:
@@ -433,52 +373,18 @@ def evaluate_retrieval(
     
     start_eval = time.time()
     
-    # Step 1: Initial retrieval (get larger pool if reranking enabled)
+    # Step 1: Retrieve
     if verbose:
         print(f"\n🔎 Searching for {len(query_ids)} queries...")
     
     retrieval_results = {}
-    queries_dict = {qid: query_vectors[idx] for idx, qid in enumerate(query_ids)}
-    
-    for query_id in tqdm(query_ids, desc="Retrieving", disable=not verbose):
-        query_vec = queries_dict[query_id]
+    for i, (query_id, query_vec) in enumerate(tqdm(zip(query_ids, query_vectors), 
+                                                      total=len(query_ids),
+                                                      desc="Retrieving", disable=not verbose)):
         results = engine.search(query_vec, top_k=RECALL_AT_K)
         retrieval_results[query_id] = results
     
-    # Step 2: Optional cross-encoder reranking for precision boost
-    if reranker and ENABLE_RERANKING:
-        if verbose:
-            print(f"\n🔄 Reranking with cross-encoder ({RERANK_MODEL})...")
-        
-        try:
-            # Get query texts for reranking
-            query_texts = {qid: corpus.get(qid, {}).get("text", "") for qid in query_ids}
-            
-            # Rerank each query's results
-            for query_id in tqdm(query_ids, desc="Reranking", disable=not verbose):
-                # Get more candidates for reranking
-                query_vec = queries_dict[query_id]
-                bq_points = engine.client.query_points(
-                    collection_name=engine.collection_name,
-                    query=query_vec.tolist() if isinstance(query_vec, np.ndarray) else query_vec,
-                    limit=RERANK_TOP_K,
-                )
-                
-                # Rerank using cross-encoder
-                query_text = query_texts.get(query_id, "")
-                if query_text:
-                    reranked = reranker.rerank(
-                        query_text,
-                        bq_points.points,
-                        top_k=RERANK_TOP_K,
-                        payload_key="text"
-                    )
-                    # Convert back to (doc_id, score) tuples
-                    retrieval_results[query_id] = [(r.doc_id, r.score) for r in reranked[:RECALL_AT_K]]
-        except Exception as e:
-            logger.warning(f"Reranking failed: {e}. Continuing with initial retrieval.")
-    
-    # Step 3: Comprehensive evaluation
+    # Step 2: Comprehensive evaluation
     if verbose:
         print(f"\n📊 Computing comprehensive metrics...")
     
@@ -509,8 +415,6 @@ def evaluate_retrieval(
         print(f"   Precision@10: {metrics['precision@10']['mean']:.4f}")
         print(f"   MAP: {metrics['map']['mean']:.4f}")
         print(f"   NDCG@10: {metrics['ndcg@10']['mean']:.4f}")
-        if reranker and ENABLE_RERANKING:
-            print(f"   (With cross-encoder reranking)")
     
     return retrieval_results, metrics
 
@@ -690,6 +594,7 @@ def main():
     
     total_start = time.time()
     
+    engine = None
     try:
         # =====================================================================
         # PHASE 0: Load FinMTEB with fallback strategy
@@ -701,7 +606,8 @@ def main():
         # =====================================================================
         embedder = SentinelEmbedder(
             device=DEVICE,
-            verbose=True
+            verbose=True,
+            vector_dim=VECTOR_DIM
         )
         
         vectors, doc_ids = vectorize_corpus(
@@ -734,24 +640,6 @@ def main():
         build_index(vectors, doc_ids, engine, verbose=True)
         
         # =====================================================================
-        # Initialize Cross-Encoder Reranker (Optional - for precision boost)
-        # =====================================================================
-        reranker = None
-        if ENABLE_RERANKING:
-            try:
-                print(f"\n🔄 Initializing cross-encoder reranker...")
-                reranker = CrossEncoderReranker(
-                    model_name=RERANK_MODEL,
-                    device=DEVICE,
-                    batch_size=RERANK_BATCH_SIZE,
-                    verbose=True
-                )
-                print(f"✅ Reranker ready (will rerank top-{RERANK_TOP_K} candidates)")
-            except Exception as e:
-                logger.warning(f"Failed to initialize reranker: {e}. Proceeding without reranking.")
-                reranker = None
-        
-        # =====================================================================
         # PHASE 3: Retrieval & Comprehensive Evaluation
         # =====================================================================
         retrieval_results, metrics = evaluate_retrieval(
@@ -760,12 +648,11 @@ def main():
             engine,
             qrels_dict,
             corpus_dict,
-            reranker=reranker,
             verbose=True
         )
         
         # =====================================================================
-        # PHASE 3B: Multi-Agent Analysis (5 specialized agents)
+        # PHASE 3B: Multi-Agent Analysis
         # =====================================================================
         agent_results = multi_agent_analysis(
             query_ids,
@@ -775,9 +662,8 @@ def main():
         )
         
         # =====================================================================
-        # PHASE 4: Export results
+        # PHASE 4: Export Results
         # =====================================================================
-        avg_recall = metrics['recall@10']['mean']
         results = export_results_comprehensive(
             metrics=metrics,
             agent_results=agent_results,
@@ -786,36 +672,36 @@ def main():
             verbose=True
         )
         
-        # =====================================================================
-        # Final Summary
-        # =====================================================================
         total_elapsed = time.time() - total_start
         
         print("\n" + "="*70)
         print("🌟 BENCHMARK COMPLETE")
         print("="*70)
-        print(f"Total execution time: {total_elapsed/60:.1f} minutes")
-        print(f"\nKey Results:")
+        print(f"Total execution time: {total_elapsed / 60:.1f} minutes")
+        print("\nKey Results:")
         print(f"  • Recall@10: {metrics['recall@10']['mean']:.4f}")
         print(f"  • Precision@10: {metrics['precision@10']['mean']:.4f}")
         print(f"  • MAP: {metrics['map']['mean']:.4f}")
         print(f"  • NDCG@10: {metrics['ndcg@10']['mean']:.4f}")
         print(f"  • Compression: {results['compression']['ratio']:.1f}x")
         print(f"  • Backhaul reduction: {results['network_analysis']['backhaul_reduction']}")
-        print(f"  • Documents: {results['system_info']['actual_documents']}")
-        print(f"  • Queries: {results['system_info']['actual_queries']}")
-        print(f"  • Agents: {results['multi_agent_system']['num_agents']}")
+        print(f"  • Documents: {len(corpus_dict)}")
+        print(f"  • Queries: {len(query_ids)}")
+        print(f"  • Agents: {agent_results['orchestrator']['agent_count']}")
         print("\n✅ Ready for IEEE TMLCN submission!")
         print("="*70 + "\n")
-        
-        # Cleanup
-        engine.close()
         
         return results
         
     except Exception as e:
         logger.error(f"Benchmark failed: {e}", exc_info=True)
         raise
+    finally:
+        if engine:
+            try:
+                engine.close()
+            except Exception as e:
+                logger.warning(f"Error closing engine: {e}")
 
 
 if __name__ == "__main__":

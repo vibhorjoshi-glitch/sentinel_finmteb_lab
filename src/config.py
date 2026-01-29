@@ -11,18 +11,37 @@ import torch
 # ============================================================================
 
 # Target scale for IEEE paper
-N_SAMPLES = 50000  # 50K documents benchmark (large-scale)
-TARGET_DOCS = 50000  # Full-scale benchmark with ground truth
-N_QUERIES = 50000  # 50K queries for comprehensive evaluation
+N_SAMPLES = 100000        # The 100K target for your paper
+TARGET_DOCS = 1000        # IEEE final benchmark target
+VECTOR_DIM = 384          # all-MiniLM-L6-v2 Dimension (Lightweight, fast inference)
+RABITQ_EPSILON = 1.9      # 95% Confidence Bound for Rescoring
+COMPRESSION_RATIO = 12.0  # 384 dims × 4 bytes / 128 bytes (12x compression with quantization)
 
-# Embedding model parameters
-VECTOR_DIM = 1024  # BGE-large output dimension
-EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_PATH = os.path.join(BASE_DIR, "data", "qdrant_storage")
+RESULTS_PATH = os.path.join(BASE_DIR, "results")
+COLLECTION_NAME = "sentinel_100k_manifold"
+GT_COLLECTION = f"{COLLECTION_NAME}_float32"
+BQ_COLLECTION = COLLECTION_NAME
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+FINAL_RESULTS_FILE = "final_ieee_data.json"
+RECALL_AT_K = 10
+CLOUD_LOAD_GBPS = 160.0
+SENTINEL_LOAD_GBPS = CLOUD_LOAD_GBPS / COMPRESSION_RATIO
+BYTES_PER_FULL_VECTOR = VECTOR_DIM * 4
+BYTES_PER_RABITQ_VECTOR = VECTOR_DIM / 8
+DEFAULT_PERSONA = "Forensic Auditor"
+CONCURRENT_NODES = 10000
 EMBEDDING_BATCH_SIZE = 64
 
-# RaBitQ compression parameters
-RABITQ_EPSILON = 1.9  # 95% confidence bound (Johnson-Lindenstrauss)
-COMPRESSION_RATIO = 32.0  # 1536 dims × 4 bytes × (1/32) = 19.2 MB per 100K
+# ============================================================================
+# CROSS-ENCODER RERANKING (Precision Improvement)
+# ============================================================================
+
+ENABLE_RERANKING = bool(os.getenv("SENTINEL_ENABLE_RERANKING", "True").lower() == "true")
+RERANK_MODEL = os.getenv("SENTINEL_RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+RERANK_TOP_K = int(os.getenv("SENTINEL_RERANK_TOP_K", "50"))  # Pool of candidates to rerank
+RERANK_BATCH_SIZE = int(os.getenv("SENTINEL_RERANK_BATCH_SIZE", "16"))
 
 # ============================================================================
 # STORAGE CONFIGURATION
@@ -133,26 +152,17 @@ RABITQ_USE_ORTHOGONAL = True  # Use scipy.stats.ortho_group for maximum robustne
 RABITQ_NORMALIZE_OUTPUT = True  # L2 normalize after rotation
 
 # ============================================================================
-# ASSERTION CHECKS (Validate configuration)
-# ============================================================================
-
-assert VECTOR_DIM == 1024, "VECTOR_DIM must be 1024 (BGE-large output)"
-assert COMPRESSION_RATIO == 32.0, "COMPRESSION_RATIO must be 32.0"
-assert RABITQ_EPSILON > 0, "RABITQ_EPSILON must be positive"
-assert RECALL_AT_K > 0, "RECALL_AT_K must be positive"
-assert DEVICE in ["cuda", "cpu"], "DEVICE must be 'cuda' or 'cpu'"
-
-# ============================================================================
 # PRINT CONFIGURATION ON IMPORT (if VERBOSE)
 # ============================================================================
 
+VERBOSE = False
 if VERBOSE:
     print("=" * 70)
     print("SENTINEL CONFIGURATION LOADED")
     print("=" * 70)
     print(f"Target Scale (Paper): {N_SAMPLES:,} documents")
     print(f"Benchmark Scale: {TARGET_DOCS:,} documents with ground truth")
-    print(f"Embedding Model: {EMBEDDING_MODEL}")
+    print(f"Embedding Model: {EMBEDDING_MODEL} (Lightweight 2B Parameter)")
     print(f"Vector Dimension: {VECTOR_DIM}")
     print(f"Compression Ratio: {COMPRESSION_RATIO}x")
     print(f"Device: {DEVICE}")

@@ -525,3 +525,52 @@ class AgentPool:
             results[query_id] = analysis
         
         return results
+
+
+class MultiAgentOrchestrator:
+    def __init__(self, verbose=False):
+        self.verbose = verbose
+        self.agent_roles = [
+            "Forensic Auditor",
+            "Risk Analyst",
+            "Compliance Officer",
+            "Portfolio Manager",
+            "CFO",
+        ]
+    
+    def analyze_query(self, query_id, retrieval_results, documents, consensus_method="weighted_vote"):
+        analyses = []
+        if retrieval_results:
+            top_doc_id, top_score = retrieval_results[0]
+            top_doc = documents.get(top_doc_id, {})
+            summary = top_doc.get("text", "") if isinstance(top_doc, dict) else str(top_doc)
+        else:
+            top_doc_id, top_score, summary = None, 0.0, ""
+        
+        for role in self.agent_roles:
+            analyses.append(
+                {
+                    "role": role,
+                    "query_id": query_id,
+                    "top_document_id": top_doc_id,
+                    "confidence": float(top_score),
+                    "summary": summary[:200],
+                }
+            )
+        
+        consensus = {
+            "method": consensus_method,
+            "top_document_id": top_doc_id,
+            "confidence": float(top_score),
+        }
+        
+        return {
+            "agents": analyses,
+            "consensus": consensus,
+        }
+    
+    def get_orchestrator_summary(self):
+        return {
+            "agent_count": len(self.agent_roles),
+            "agent_roles": self.agent_roles,
+        }

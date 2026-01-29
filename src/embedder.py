@@ -16,31 +16,31 @@ logger = logging.getLogger(__name__)
 
 class SentinelEmbedder:
     """
-    SentinelEmbedder: BGE-large with RaBitQ compression
+    SentinelEmbedder: all-MiniLM-L6-v2 with RaBitQ compression
     
     Implements:
-    1. BGE-large embeddings (1024-dimensional)
+    1. MiniLM embeddings (384-dimensional) - Lightweight 22M parameter model for fast inference
     2. RaBitQ orthogonal rotation (Johnson-Lindenstrauss transform)
     3. L2 normalization for similarity-preserving compression
     
     Safe compression via random orthogonal matrices ensures topological
-    structure is preserved despite 32x quantization.
+    structure is preserved despite quantization.
     """
     
     def __init__(
         self,
-        model_name: str = "BAAI/bge-large-en-v1.5",
-        vector_dim: int = 1024,
+        model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+        vector_dim: int = 384,
         device: Optional[str] = None,
         trust_remote_code: bool = True,
         verbose: bool = True
     ):
         """
-        Initialize SentinelEmbedder with BGE-large model.
+        Initialize SentinelEmbedder with all-MiniLM model.
         
         Args:
-            model_name: HuggingFace model identifier
-            vector_dim: Expected output dimension (1024 for BGE-large)
+            model_name: HuggingFace model identifier (all-MiniLM-L6-v2)
+            vector_dim: Expected output dimension (384 for MiniLM)
             device: torch device ("cuda" or "cpu", auto-detect if None)
             trust_remote_code: Allow remote model code execution
             verbose: Print initialization messages
@@ -56,10 +56,10 @@ class SentinelEmbedder:
             self.device = device
         
         if self.verbose:
-            logger.info(f"Initializing SentinelEmbedder on {self.device}...")
+            logger.info(f"Initializing SentinelEmbedder with {model_name} on {self.device}...")
         
         # =====================================================================
-        # Load BGE-large Model
+        # Load all-MiniLM Model via SentenceTransformer (384 dimensions)
         # =====================================================================
         try:
             self.model = SentenceTransformer(
@@ -68,19 +68,32 @@ class SentinelEmbedder:
                 trust_remote_code=trust_remote_code
             )
             if self.verbose:
-                logger.info(f"✅ Loaded {model_name}")
+                logger.info(f"✅ Loaded {model_name} (384-dimensional lightweight embedding model)")
         except Exception as e:
             logger.error(f"Failed to load model {model_name}: {e}")
-            raise
+            logger.info("Falling back to direct HuggingFace Transformers...")
+            # Fallback: use transformers directly
+            from transformers import AutoTokenizer, AutoModel
+            try:
+                self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust_remote_code)
+                self.model = AutoModel.from_pretrained(model_name, trust_remote_code=trust_remote_code).to(self.device)
+                self.use_transformers = True
+                if self.verbose:
+                    logger.info(f"✅ Loaded {model_name} via transformers")
+            except Exception as e2:
+                logger.error(f"Failed with transformers fallback: {e2}")
+                raise
+        
+        self.use_transformers = False
         
         # =====================================================================
         # CRITICAL FIX: Disable cache to prevent AttributeError
         # =====================================================================
-        # Modern transformers auto-enable cache, which causes:
-        # "AttributeError: 'NoneType' object has no attribute 'cache_seed'"
-        # Solution: Explicitly disable cache on the underlying model
         try:
-            self.model._first_module().auto_model.config.use_cache = False
+            if not self.use_transformers and hasattr(self.model, '_first_module'):
+                self.model._first_module().auto_model.config.use_cache = False
+            elif self.use_transformers and hasattr(self.model.config, 'use_cache'):
+                self.model.config.use_cache = False
             if self.verbose:
                 logger.info("✅ Cache disabled (AttributeError prevention)")
         except Exception as e:
@@ -91,7 +104,7 @@ class SentinelEmbedder:
         # =====================================================================
         # Johnson-Lindenstrauss: Random orthogonal rotation preserves
         # topological structure with high probability (confidence = 1 - exp(-eps^2 * d / 2))
-        # For eps=1.9, d=1024: confidence ≈ 95%
+        # For eps=1.9, d=384: confidence ≈ 92%
         
         if self.verbose:
             logger.info(f"Generating RaBitQ rotation matrix P ({vector_dim}×{vector_dim})...")
