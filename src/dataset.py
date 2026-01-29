@@ -2,7 +2,8 @@ import json
 import os
 import random
 from datasets import load_dataset
-from .config import N_SAMPLES
+
+N_SAMPLES = 100000  # The 100K target for the FinMTEB benchmark
 
 
 class SentinelDatasetManager:

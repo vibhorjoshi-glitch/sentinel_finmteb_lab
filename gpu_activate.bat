@@ -122,8 +122,10 @@ if torch.cuda.is_available():
     y = torch.randn(1000, 1000, device='cuda')
     z = torch.matmul(x, y)
     print('   ✓ GPU computation successful')
+    print('   GPU computation successful')
 else:
     print('   ✗ CUDA not available in PyTorch')
+    print('   CUDA not available in PyTorch')
     print('   Reinstall: pip install torch --index-url https://download.pytorch.org/whl/cu121')
 PYTHON_EOF
 ) else (
